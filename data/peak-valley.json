@@ -1,0 +1,56 @@
+{
+  "schema": "dsh-peakvalley/rules@1",
+  "vendor": "DeepSeek API",
+  "timezone": "Asia/Shanghai",
+  "timezoneLabel": "北京时间",
+  "peak": {
+    "weekdayNames": "周一至周五",
+    "weekdays": [1, 2, 3, 4, 5],
+    "windows": [
+      ["09:00", "12:00"],
+      ["14:00", "18:00"]
+    ],
+    "excludeHolidays": true
+  },
+  "offPeak": {
+    "definition": "其余所有时段，包括周末及中国法定节假日全天",
+    "ratioOfPeak": 0.5,
+    "note": "空闲时段价格为高峰时段价格的一半"
+  },
+  "holidays": {
+    "source": "国务院办公厅关于2026年部分节假日安排的通知（国办发明电〔2025〕7号，2025-11-04）",
+    "url": "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm",
+    "note": "放假安排（含调休放假）整段算中国法定节假日；次年的安排在每年 11 月前后公布，公布后需补进本文件。",
+    "2026": [
+      { "name": "元旦", "from": "2026-01-01", "to": "2026-01-03" },
+      { "name": "春节", "from": "2026-02-15", "to": "2026-02-23" },
+      { "name": "清明节", "from": "2026-04-04", "to": "2026-04-06" },
+      { "name": "劳动节", "from": "2026-05-01", "to": "2026-05-05" },
+      { "name": "端午节", "from": "2026-06-19", "to": "2026-06-21" },
+      { "name": "中秋节", "from": "2026-09-25", "to": "2026-09-27" },
+      { "name": "国庆节", "from": "2026-10-01", "to": "2026-10-07" }
+    ]
+  },
+  "makeupWorkdays": {
+    "note": "国务院公布的调休上班日，均落在周六/周日。定价规则写的是「周一至周五」，所以这些日子按字面口径仍为空闲；若要改口径，改这里的同时也要改判定逻辑。",
+    "2026": [
+      "2026-01-04",
+      "2026-02-14",
+      "2026-02-28",
+      "2026-05-09",
+      "2026-09-20",
+      "2026-10-10"
+    ]
+  },
+  "source": {
+    "name": "DeepSeek API 文档 · 模型 & 价格",
+    "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    "urlEn": "https://api-docs.deepseek.com/quick_start/pricing",
+    "changelog": "https://api-docs.deepseek.com/zh-cn/updates",
+    "quoted": "空闲时段价格为高峰时段价格的一半。北京时间周一至周五（不含中国法定节假日）9:00 - 12:00、14:00 - 18:00 为高峰时段；其余时段，包括周末及中国法定节假日全天均为空闲时段。",
+    "quotedEn": "Off-peak rates are half of the peak rates. Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full."
+  },
+  "rulesUpdatedAt": "2026-10-06",
+  "checkedAt": "2026-10-06T14:20:00+08:00",
+  "checkedNote": "初次导入：中文定价页脚注(2) + 国办发明电〔2025〕7号"
+}

@@ -1,0 +1,54 @@
+{
+  "name": "dsh-indicators",
+  "version": "0.3.0",
+  "description": "macOS 菜单栏指示器 for DeepSeek Harness —— 屏幕右上角一块板：工作状态（agent 在不在干活）与峰谷时段（DeepSeek API 全价/半价）；一旦有操作在等授权，整条换成黄底黑字的「需要授权」，别的什么都不显示。宿主半边订阅 agent/status、峰谷规则与审批事件，把结果写成一份状态文件，菜单栏 App 只读它。纯宿主插件：没有浏览器半边，软件界面里不留任何东西。",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yu6Liu7Qi/dsh-indicators.git"
+  },
+  "author": "Yu6Liu7Qi",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "data",
+    "menubar",
+    "scripts",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prepare": "node scripts/build-menubar.mjs",
+    "build:menubar": "node scripts/build-menubar.mjs",
+    "check:menubar": "node scripts/build-menubar.mjs --check"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "menubar",
+    "macos",
+    "status",
+    "deepseek",
+    "peak",
+    "off-peak"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

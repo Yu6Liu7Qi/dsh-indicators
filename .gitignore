@@ -1,0 +1,15 @@
+# macOS 每次都会往这儿塞
+.DS_Store
+
+# 依赖（本插件零依赖，但 profile 里那套工具链可能会生成）
+node_modules/
+pnpm-lock.yaml
+
+# 编译中间产物：最终二进制在 menubar/MenuBarIndicators，是要提交的
+*.o
+*.swiftmodule
+menubar/.MenuBarIndicators.new
+
+# 临时文件
+*.tmp
+*.log

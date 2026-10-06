@@ -1,0 +1,10 @@
+# dsh-indicators bundle patch.
+#
+# 以 profile bundle 方式安装后，这一行把菜单栏指示器的宿主半边挂进加载器；
+# 浏览器半边由 @deepseek-ai/dsh-client-modules 从本包的 `dsh.client` 声明
+# （platform: web）自动组成 boot graph 并下发 `./client`。
+#
+# 行的 `name` 就是本包名，从 profile 自己的模块图里解析。
+- insert:
+    - id: indicators
+      name: 'dsh-indicators'
