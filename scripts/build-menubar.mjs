@@ -6,7 +6,7 @@
  *
  *   1. **钉部署目标**。不写 `-target` 的话，二进制里记的最低系统版本会跟着编译机
  *      的 SDK 走 —— 在一台 macOS 28 上编出来的东西，macOS 26 的用户双击只会得到
- *      「需要更高版本的 macOS」。这个坑踩过一次，别再踩。
+ *      「需要更高版本的 macOS」。该问题在实际编译中出现过。
  *   2. **出 universal**（arm64 + x86_64）。只出 arm64 的话 Intel Mac 直接不认。
  *
  * 没装 Command Line Tools 时（找不到 swiftc）**不算失败**：仓库里带着一份预编译
@@ -141,7 +141,7 @@ try {
 	});
 	console.log("· 合并成 universal…");
 	// 先落到同目录的临时名再 rename：菜单栏 App 可能正跑着，覆盖运行中的可执行
-	// 文件会拿到 ETXTBSY；rename 是原子的，正在跑的进程不受影响，下次启动即新版。
+	// 文件会拿到 ETXTBSY；rename 是原子的，正在运行的进程不受影响，下次启动即新版。
 	const staged = join(root, "menubar", ".MenuBarIndicators.new");
 	execFileSync("lipo", ["-create", ...slices, "-output", staged], { stdio: "inherit" });
 	execFileSync("chmod", ["755", staged]);

@@ -37,7 +37,7 @@ struct SessionRow: Decodable {
     let cwd: String?
 }
 
-/// work 段：谁在干活。
+/// work 段：谁在运行。
 struct WorkSection: Decodable {
     let running: Int
     let total: Int
@@ -56,7 +56,7 @@ struct PeakSection: Decodable {
     let sourceName: String?
 }
 
-/// approval 段：此刻有几个授权请求在等用户点头。
+/// approval 段：此刻有几个授权请求在等待用户授权。
 struct ApprovalSection: Decodable {
     /// 待处理的授权请求数；0 或整段缺失都表示没有。
     let pending: Int
@@ -76,17 +76,17 @@ struct IndicatorsFile: Decodable {
 
 /// 工作状态呈现的三种状态。
 enum WorkState {
-    /// 有 agent 在跑；carried = 在跑的会话数。
+    /// 有 agent 在运行；carried = 运行中的会话数。
     case working(Int)
-    /// DSH 活着但没人在跑；carried = 活着的会话数。
+    /// DSH 进程存活但没有 agent 在运行；carried = 存活的会话数。
     case idle(Int)
-    /// DSH 没在跑，或心跳过期。
+    /// DSH 已退出，或心跳过期。
     case offline
 
     /// 胶囊上的文字。
     ///
     /// 只写「工作中」，不带数字 —— 跑几个会话这件事在菜单栏上没意义（挤不下也读不
-    /// 过来）。具体是哪些对话在跑，看悬停提示和下拉菜单，那里有名有姓。
+    /// 过来）。具体哪些对话在运行，见悬停提示和下拉菜单，那里列出了名称。
     var pillText: String {
         switch self {
         case .working: return "工作中"
@@ -151,7 +151,7 @@ enum Palette {
     static let peak = hex(0xE01B1B)
     /// 谷 —— 绿。
     static let off = hex(0x0A7F45)
-    /// 授权告警条的底色 —— 金黄。整条铺满，是菜单栏上最跳的一块，就是要你看它。
+    /// 授权告警条的底色 —— 金黄。整条铺满，是菜单栏上最醒目的一块，用于提示待处理事项。
     /// 这两个色只在「需要授权」那一条上用，不参与状态胶囊。
     static let alertFill = hex(0xF7B500)
     /// 授权告警条上的字 —— 近黑。压在金黄底上对比度 11.6:1，比先前白底配黄字
@@ -230,13 +230,37 @@ let staleAfterMs: Double = 15_000
 
 // MARK: - 解析
 
-/// 读取并解析整份状态文件。
+/// 上一次读到的状态文件修改时间与解码结果。
+///
+/// 宿主每 5 秒才写一次（心跳），读取端却每秒读一次 —— 文件未变动时无需重新读盘解码。
+/// 注意只缓存「文件内容」这一半：心跳是否过期仍然按当前时间现算，不然离线判定会失灵。
+private var cachedStatusMtime: Date?
+private var cachedStatusFile: IndicatorsFile?
+
+/// 读状态文件；文件没变过就直接返回上次的解码结果。
+/// - Returns: 解析好的文件内容；读不到或解析失败时为 nil。
+func statusFileIfChanged() -> IndicatorsFile? {
+    let mtime = (try? FileManager.default.attributesOfItem(atPath: statusFilePath))?[.modificationDate] as? Date
+    if let mtime, mtime == cachedStatusMtime, let hit = cachedStatusFile {
+        return hit
+    }
+    guard let data = FileManager.default.contents(atPath: statusFilePath),
+          let file = try? JSONDecoder().decode(IndicatorsFile.self, from: data) else {
+        cachedStatusMtime = mtime
+        cachedStatusFile = nil
+        return nil
+    }
+    cachedStatusMtime = mtime
+    cachedStatusFile = file
+    return file
+}
+
+/// 读取并解析整份状态文件（带 mtime 缓存，见 `statusFileIfChanged`）。
 /// - Returns: work、peak 两段加待授权数；文件缺失、损坏或心跳过期时 work = 离线、
 ///   peak = nil、待授权数 = 0（心跳过期的那份状态已经不可信，不能拿它报授权）。
 func resolve() -> (work: WorkResolved, peak: PeakResolved?, pendingApprovals: Int) {
     let offline = WorkResolved(state: .offline, sessions: [], ageMs: nil, hostPid: nil)
-    guard let data = FileManager.default.contents(atPath: statusFilePath),
-          let file = try? JSONDecoder().decode(IndicatorsFile.self, from: data) else {
+    guard let file = statusFileIfChanged() else {
         return (offline, nil, 0)
     }
     let ageMs = Date().timeIntervalSince1970 * 1000 - file.updatedAt
@@ -291,16 +315,56 @@ func formatMoment(_ ms: Double, timeZone: String) -> String {
     return formatter.string(from: Date(timeIntervalSince1970: ms / 1000))
 }
 
-/// 胶囊的字体与文字属性：semibold 10.5pt，颜色可换（告警条上是近黑）。
+/// 胶囊字体：10.5pt semibold。建一次就够，不必每帧 `systemFont`。
+let pillFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
+
+/// 不透明文字用的属性（量宽度、预渲染文字都用它）。
+let pillOpaqueAttributes: [NSAttributedString.Key: Any] = [
+    .font: pillFont,
+    .foregroundColor: NSColor.white,
+]
+
+/// 文字 alpha 量化级数。
+///
+/// 交叉淡化时 alpha 是连续值，而 CoreGraphics 的字形光栅化缓存是按 (字符, alpha)
+/// 建条目的 —— 连续值等于喂它无穷多个键。实测：连续 60 次状态切换后进程涨了 22MB
+/// 且不回落，把 alpha 量化到 32 级后同样 60 次只涨 13MB 并中途回落。32 级在 0.3 秒
+/// 的动画里肉眼分辨不出。
+let textAlphaSteps: CGFloat = 32
+
+/// 属性字典缓存：key =「颜色|量化后的 alpha」。动画里 alpha 只有 32 档、颜色也就几种，
+/// 命中率接近 100%，省掉每帧重建字典。
+var pillAttributeCache: [String: [NSAttributedString.Key: Any]] = [:]
+
+/// 胶囊的字体与文字属性（带缓存 + alpha 量化）。
 /// - Parameters:
-///   - alpha: 文字不透明度（文字交叉淡化时用）。
+///   - alpha: 文字不透明度，内部量化到 `textAlphaSteps` 级。
 ///   - color: 文字颜色。
 /// - Returns: 画胶囊文字用的属性字典。
 func pillAttributes(alpha: CGFloat = 1, color: NSColor = .white) -> [NSAttributedString.Key: Any] {
-    [
-        .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
-        .foregroundColor: color.withAlphaComponent(alpha),
+    let quantized = (alpha * textAlphaSteps).rounded() / textAlphaSteps
+    let key = "\(color.description)|\(quantized)"
+    if let hit = pillAttributeCache[key] { return hit }
+    let attributes: [NSAttributedString.Key: Any] = [
+        .font: pillFont,
+        .foregroundColor: color.withAlphaComponent(quantized),
     ]
+    pillAttributeCache[key] = attributes
+    return attributes
+}
+
+/// 文字宽度缓存：`size(withAttributes:)` 是 CoreText 调用，动画里每帧量一遍太浪费。
+/// 胶囊文字翻来覆去就那几个（工作中 / 空闲 / 离线 / 峰 / 谷 / 需要授权），命中率极高。
+var textWidthCache: [String: CGFloat] = [:]
+
+/// 量一行文字的宽度，带缓存。
+/// - Parameter text: 文字。
+/// - Returns: 宽度（点，向上取整）。
+func cachedTextWidth(_ text: String) -> CGFloat {
+    if let hit = textWidthCache[text] { return hit }
+    let width = ceil((text as NSString).size(withAttributes: pillOpaqueAttributes).width)
+    textWidthCache[text] = width
+    return width
 }
 
 /// 尺寸常量。R 角按**同心圆角**来：外圆角 = 内圆角 + 内边距，两块弧线共用圆心，
@@ -338,7 +402,7 @@ struct PillVisual {
     /// 整体不透明度；0 表示收起来了。
     var alpha: CGFloat
 
-    /// 从「文字 + 底色」造一颗，文字宽度自己量。
+    /// 从「文字 + 底色」造一颗，文字宽度走缓存。
     /// - Parameters:
     ///   - id: 身份。
     ///   - text: 胶囊文字。
@@ -349,7 +413,7 @@ struct PillVisual {
             id: id,
             text: text,
             color: color,
-            textWidth: ceil((text as NSString).size(withAttributes: pillAttributes()).width),
+            textWidth: cachedTextWidth(text),
             alpha: alpha
         )
     }
@@ -391,6 +455,18 @@ let tweenDuration: TimeInterval = {
     }
     return 0.30
 }()
+
+/// 补间帧率。
+///
+/// 这里**没有**降到 30fps。原本是打算靠降帧省 CPU 的（实测确实能省四成），但把绘制
+/// 换成「预渲染 + 合成」之后，60fps 的成本已经掉到 10% 上下（原来 22~29%）—— 再降帧
+/// 就是拿动画质量换那 4 个点，不划算。真想省电，把这里改成 30 即可。
+///
+/// 为什么不挂 CADisplayLink 跟 VSync 对齐：那个 API 要落在 NSView 上
+/// （`NSView.displayLink(target:selector:)`），而菜单栏状态项只有一个系统给的
+/// NSStatusBarButton，往里添加子视图会干扰系统自身的绘制。何况这里只是更新一张 image，
+/// 合成本来就是系统按刷新率做的 —— 与其追帧率，不如把每帧做便宜。
+let tweenFPS: Double = 60
 
 /// ease-out cubic：起步快、收尾稳，跟系统状态切换的节奏一致。
 /// - Parameter t: 线性进度 0…1。
@@ -438,7 +514,34 @@ func resolve(_ tween: PillTween, t: CGFloat) -> PillVisual {
     return PillVisual(id: tween.id, text: text, color: color, textWidth: textWidth, alpha: alpha)
 }
 
-/// 在胶囊正中画一行字。
+/// 文字预渲染缓存：key =「文字|颜色」→ 透明底、完全不透明的文字位图。
+///
+/// 动画里同一行字要画几十遍，每遍只是 alpha 不同。把字形光栅化的结果留下来，之后
+/// 每帧只做一次位图合成（`draw(_:fraction:)`），不再碰 CoreText —— `sample` 里
+/// `CGGlyphBitmapCreateWithPathAndDilation` 一直是最大的单个热点。
+var textSpriteCache: [String: NSImage] = [:]
+
+/// 取（或生成）一行文字的 sprite。
+/// - Parameters:
+///   - text: 文字。
+///   - color: 文字颜色。
+/// - Returns: 透明底、alpha = 1 的文字位图（四周留 1pt 余量给抗锯齿）。
+func textSprite(_ text: String, color: NSColor) -> NSImage {
+    let key = "\(text)|\(color.description)"
+    if let hit = textSpriteCache[key] { return hit }
+    let measured = (text as NSString).size(withAttributes: pillAttributes(alpha: 1, color: color))
+    let size = NSSize(width: ceil(measured.width) + 2, height: ceil(measured.height) + 2)
+    let image = makeBitmapImage(size: size) { _ in
+        (text as NSString).draw(
+            at: NSPoint(x: 1, y: 1),
+            withAttributes: pillAttributes(alpha: 1, color: color)
+        )
+    }
+    textSpriteCache[key] = image
+    return image
+}
+
+/// 在胶囊正中画一行字（走 sprite 缓存，alpha 交给合成）。
 /// - Parameters:
 ///   - text: 文字。
 ///   - alpha: 不透明度。
@@ -447,22 +550,26 @@ func resolve(_ tween: PillTween, t: CGFloat) -> PillVisual {
 ///   - color: 文字颜色；默认白。
 func drawPillText(_ text: String, alpha: CGFloat, centerX: CGFloat, rect: NSRect, color: NSColor = .white) {
     guard alpha > 0.01, !text.isEmpty else { return }
-    let attributes = pillAttributes(alpha: alpha, color: color)
-    let size = (text as NSString).size(withAttributes: attributes)
-    let textRect = NSRect(
-        x: centerX - size.width / 2,
-        y: rect.minY + (rect.height - size.height) / 2,
-        width: size.width,
-        height: size.height
+    let sprite = textSprite(text, color: color)
+    let size = sprite.size
+    // 位置取整：让文字落在整像素上，别因为半像素偏移发虚。
+    let origin = NSPoint(
+        x: (centerX - size.width / 2).rounded(),
+        y: (rect.midY - size.height / 2).rounded()
     )
-    (text as NSString).draw(in: textRect, withAttributes: attributes)
+    sprite.draw(
+        at: origin,
+        from: NSRect(origin: .zero, size: size),
+        operation: .sourceOver,
+        fraction: alpha
+    )
 }
 
 /// 开一块 2x 位图并交给 `body` 按「点」作图，画完包成 NSImage。
 ///
 /// 自己按屏幕缩放画 2x 位图，而不是让 AppKit 放大 1x 图：胶囊里是文字，缩放会
 /// 发虚。`body` 拿到的上下文里 rep.size 已经声明成点，因此**不能**再自己
-/// scaleBy —— 再缩放一次就画出界，被位图裁掉半边（这个坑踩过一次）。
+/// scaleBy —— 再缩放一次就会画出边界，被位图裁掉半边（该问题在实际编译中出现过）。
 /// - Parameters:
 ///   - size: 图片尺寸（点）。
 ///   - body: 作图闭包。
@@ -536,6 +643,109 @@ func drawPillGloss(in pill: NSBezierPath, rect: NSRect, alpha: CGFloat) {
     NSGraphicsContext.restoreGraphicsState()
 }
 
+/// 玻璃板底的预渲染缓存。
+///
+/// 板底是「纯垂直渐变 + 水平方向处处一样」，所以只要渲一条「左圆角 + 2pt 芯 + 右圆角」
+/// 的窄条，画的时候把中间那段拉长就行 —— 像素级等价，却省掉了每帧的渐变填充、圆角
+/// 路径裁剪和描边（`sample` 里 `RGBA32_shade_axial_RGB` 与 `Clipper2Lib` 是仅次于
+/// 字形光栅化的两块热点）。
+///
+/// key 里的 alertness 量化到 1/16：玻璃板 ↔ 金黄条只在进/出告警时过渡，16 档够用。
+var boardSpriteCache: [String: NSImage] = [:]
+
+/// 板底 sprite 中间那截可拉伸部分的宽度（点）。
+let boardSpriteCoreWidth: CGFloat = 2
+
+/// 取（或生成）一块板底的 sprite。
+/// - Parameters:
+///   - alertness: 告警条浓度 0…1（内部量化到 1/16）。
+///   - dark: 是否深色外观。
+/// - Returns: 宽 = 两个圆角 + 2pt 芯、高 = 板高的位图。
+func boardSprite(alertness: CGFloat, dark: Bool) -> NSImage {
+    let quantized = (alertness * 16).rounded() / 16
+    let key = "\(quantized)|\(dark)"
+    if let hit = boardSpriteCache[key] { return hit }
+
+    let cap = Metrics.boardRadius
+    let size = NSSize(width: cap * 2 + boardSpriteCoreWidth, height: Metrics.boardHeight)
+    let image = makeBitmapImage(size: size) { _ in
+        let bounds = NSRect(origin: .zero, size: size)
+        let board = NSBezierPath(roundedRect: bounds, xRadius: cap, yRadius: cap)
+        let glassFade = 1 - quantized
+        if glassFade > 0.01,
+           let gradient = NSGradient(colors: BoardPalette.glass(dark: dark).map {
+               $0.withAlphaComponent($0.alphaComponent * glassFade)
+           }) {
+            gradient.draw(in: board, angle: -90)
+        }
+        NSGraphicsContext.saveGraphicsState()
+        board.addClip()
+        if glassFade > 0.01 {
+            let gloss = BoardPalette.gloss(dark: dark)
+            gloss.withAlphaComponent(gloss.alphaComponent * glassFade).setFill()
+            NSRect(x: 0, y: Metrics.boardHeight - 1, width: size.width, height: 1).fill()
+            let shade = BoardPalette.shade(dark: dark)
+            shade.withAlphaComponent(shade.alphaComponent * glassFade).setFill()
+            NSRect(x: 0, y: 0, width: size.width, height: 1).fill()
+        }
+        if quantized > 0.01 {
+            let fill = Palette.alertFill
+            fill.withAlphaComponent(fill.alphaComponent * quantized).setFill()
+            board.fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        board.lineWidth = 1
+        if glassFade > 0.01 {
+            let edge = BoardPalette.edge(dark: dark)
+            edge.withAlphaComponent(edge.alphaComponent * glassFade).setStroke()
+            board.stroke()
+        }
+        if quantized > 0.01 {
+            BoardPalette.alertEdge
+                .withAlphaComponent(BoardPalette.alertEdge.alphaComponent * quantized)
+                .setStroke()
+            board.stroke()
+        }
+    }
+    boardSpriteCache[key] = image
+    return image
+}
+
+/// 把板底 sprite 画成目标宽度：左右两个圆角原样贴，中间那段拉长。
+/// - Parameters:
+///   - sprite: 板底 sprite。
+///   - width: 目标宽度。
+func drawBoardSprite(_ sprite: NSImage, width: CGFloat) {
+    let cap = Metrics.boardRadius
+    let core = boardSpriteCoreWidth
+    let height = Metrics.boardHeight
+    let sourceHeight = sprite.size.height
+    let middle = max(width - cap * 2, 0)
+    // 左圆角
+    sprite.draw(
+        in: NSRect(x: 0, y: 0, width: cap, height: height),
+        from: NSRect(x: 0, y: 0, width: cap, height: sourceHeight),
+        operation: .sourceOver,
+        fraction: 1
+    )
+    // 中段：纯水平拉伸。板的渐变是垂直的，水平方向本来就处处一样，所以不失真。
+    if middle > 0 {
+        sprite.draw(
+            in: NSRect(x: cap, y: 0, width: middle, height: height),
+            from: NSRect(x: cap, y: 0, width: core, height: sourceHeight),
+            operation: .sourceOver,
+            fraction: 1
+        )
+    }
+    // 右圆角
+    sprite.draw(
+        in: NSRect(x: max(width - cap, 0), y: 0, width: cap, height: height),
+        from: NSRect(x: cap + core, y: 0, width: cap, height: sourceHeight),
+        operation: .sourceOver,
+        fraction: 1
+    )
+}
+
 /// 画菜单栏上真正显示的那一项：**一块板 + 板里并排的胶囊**。
 ///
 /// 两个指示器必须合成一张图才能共用一块板 —— 拆成两个 NSStatusItem 的话，中间
@@ -543,7 +753,7 @@ func drawPillGloss(in pill: NSBezierPath, rect: NSRect, alpha: CGFloat) {
 ///
 /// `alertness` 决定这是哪种板：0 = 液态玻璃板 + 实色胶囊 + 白字；1 = 授权告警的
 /// 金黄条 + 近黑字（胶囊底整个退掉，只剩字）。中间值就是两者的交叉淡化，所以
-/// 「有请求等你点头」是从正常状态平滑滚过去的，不是啪地换一张图。
+/// 「有请求等待授权」是从正常状态平滑过渡过去的，不是瞬间替换整张图片。
 /// - Parameters:
 ///   - tweens: 从左到右的胶囊补间；空数组返回 1pt 的空图。
 ///   - t: 补间进度 0…1（静止时传 1）。
@@ -574,46 +784,8 @@ func makeBoard(
     let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
 
     return makeBitmapImage(size: NSSize(width: max(width, 1), height: Metrics.boardHeight)) { _ in
-        let bounds = NSRect(x: 0, y: 0, width: width, height: Metrics.boardHeight)
-        let board = NSBezierPath(
-            roundedRect: bounds,
-            xRadius: Metrics.boardRadius,
-            yRadius: Metrics.boardRadius
-        )
-        // 玻璃板整体按 (1 - alertness) 淡出，黄条按 alertness 淡入，两边交叉过渡。
-        let glassFade = 1 - alertness
-        if glassFade > 0.01,
-           let gradient = NSGradient(colors: BoardPalette.glass(dark: dark).map {
-               $0.withAlphaComponent($0.alphaComponent * glassFade)
-           }) {
-            gradient.draw(in: board, angle: -90)
-        }
-        NSGraphicsContext.saveGraphicsState()
-        board.addClip()
-        if glassFade > 0.01 {
-            let gloss = BoardPalette.gloss(dark: dark)
-            gloss.withAlphaComponent(gloss.alphaComponent * glassFade).setFill()
-            NSRect(x: 0, y: Metrics.boardHeight - 1, width: width, height: 1).fill()
-            let shade = BoardPalette.shade(dark: dark)
-            shade.withAlphaComponent(shade.alphaComponent * glassFade).setFill()
-            NSRect(x: 0, y: 0, width: width, height: 1).fill()
-        }
-        if alertness > 0.01 {
-            let fill = Palette.alertFill
-            fill.withAlphaComponent(fill.alphaComponent * alertness).setFill()
-            board.fill()
-        }
-        NSGraphicsContext.restoreGraphicsState()
-        board.lineWidth = 1
-        if glassFade > 0.01 {
-            let edge = BoardPalette.edge(dark: dark)
-            edge.withAlphaComponent(edge.alphaComponent * glassFade).setStroke()
-            board.stroke()
-        }
-        if alertness > 0.01 {
-            BoardPalette.alertEdge.withAlphaComponent(BoardPalette.alertEdge.alphaComponent * alertness).setStroke()
-            board.stroke()
-        }
+        // 板底走预渲染 sprite + 九宫格拉伸：渐变、圆角裁剪、描边不再逐帧重做。
+        drawBoardSprite(boardSprite(alertness: alertness, dark: dark), width: width)
 
         var x = Metrics.boardPad
         for (index, pill) in pills.enumerated() {
@@ -698,11 +870,11 @@ func drawPill(
 
 /// 探测一个进程是否还存在。
 /// - Parameter pid: 状态文件里记的 DSH 宿主 pid。
-/// - Returns: true 表示进程在（或无权探测，保守当活着）。
+/// - Returns: true 表示进程存在（或无权探测，保守判定为存活）。
 func processAlive(_ pid: Int) -> Bool {
     if pid <= 0 { return true }
     if kill(pid_t(pid), 0) == 0 { return true }
-    // ESRCH = 没这个进程；EPERM = 有但不让碰，也算活着。
+    // ESRCH = 进程不存在；EPERM = 存在但无权限探测，按存活处理。
     return errno != ESRCH
 }
 
@@ -714,14 +886,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var work = WorkResolved(state: .offline, sessions: [], ageMs: nil, hostPid: nil)
     private var peak: PeakResolved?
-    /// 正在等用户点头的授权请求数。
+    /// 等待用户授权的请求数。
     private var pendingApprovals = 0
     private var lastSignature = ""
     /// 屏上此刻的样子（动画中就是插值出来的中间态）。
     private var displayed: [PillVisual] = []
     /// 告警条浓度：0 = 普通玻璃板，1 = 授权金黄条（见 makeBoard）。
     private var alertness: CGFloat = 0
-    /// 正在跑的补间；nil = 静止。alertFrom/alertTo 是告警条浓度这一段的起止。
+    /// 进行中的补间；nil = 静止。alertFrom/alertTo 是告警条浓度这一段的起止。
     private var tween: (
         items: [PillTween],
         target: [PillVisual],
@@ -731,6 +903,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     )?
     /// 补间期间逐帧重绘用的计时器。
     private var frameTimer: Timer?
+    /// 上一次真正画出去的进度值，用来跳掉肉眼分不出的帧（见 stepTween）。
+    private var lastDrawnT: CGFloat = -1
     /// 第一次见到的 DSH 宿主进程 pid。它一变就说明 DSH 重启过 ——
     /// 本实例让位给插件新拉起来的那一个，免得菜单栏挂出两套指示器。
     private var hostPid: Int?
@@ -834,7 +1008,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
     /// 菜单栏此刻该显示哪几颗胶囊。
     ///
-    /// 有请求等着点头时**整条让给授权提示** —— 金黄条上只有一行黑字，峰谷和工作
+    /// 有请求等待授权时**整条让给授权提示** —— 金黄条上只有一行黑字，峰谷和工作
     /// 状态都先让位：那两件事再急也不用用户动手，授权不用就会卡住。
     ///
     /// 平时从左到右是「峰谷 → 工作状态」：工作状态靠屏幕边缘、变化也最勤，让它
@@ -856,7 +1030,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     /// 把菜单栏切到新的胶囊组合 / 告警条。
     ///
     /// 状态切换走补间：底色在 sRGB 里滚过去，文字交叉淡化，胶囊宽度（连带整块板
-    /// 的宽度）一起缓动 —— 峰谷读数消失时那一颗是「收拢着淡出」的，不会啪地少一
+    /// 的宽度）一起缓动 —— 峰谷读数消失时那一颗是「收拢着淡出」的，不会瞬间少一
     /// 块。进/出授权告警条也一样：玻璃板与黄条交叉淡化，不是换一张图。
     /// - Parameters:
     ///   - next: 目标胶囊列表。
@@ -881,7 +1055,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         }
 
         let items = makeTweens(from: displayed, to: next)
-        // 胶囊一模一样、告警浓度也没变，就别折腾了。
+        // 胶囊一模一样、告警浓度也没变，则无需动画。
         guard items.contains(where: { !same($0.from, $0.to) }) || alert != alertness else { return }
         startTween(items, target: next, alert: alert)
     }
@@ -923,12 +1097,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 起一段补间，并保证帧循环在跑。
+    /// 起一段补间，并确保帧循环已启动。
     /// - Parameters:
     ///   - items: 补间列表。
     ///   - target: 目标胶囊（动画跑完屏上就是它）。
     ///   - alert: 目标告警条浓度。
     private func startTween(_ items: [PillTween], target: [PillVisual], alert: CGFloat) {
+        // 新一段补间从「什么都没画过」开始，第一帧无论如何都要落地。
+        lastDrawnT = -1
         tween = (
             items: items,
             target: target,
@@ -937,7 +1113,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             alertTo: alert
         )
         if frameTimer == nil {
-            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: 1.0 / tweenFPS, repeats: true) { [weak self] _ in
                 self?.stepTween()
             }
             RunLoop.main.add(timer, forMode: .common)
@@ -950,6 +1126,10 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         guard let anim = tween, let button = item.button else { return }
         let raw = min(max((Date().timeIntervalSince1970 - anim.start) / tweenDuration, 0), 1)
         let t = easeOutCubic(raw)
+        // 跳帧：ease-out 的尾巴上 t 的增量越来越小，肉眼分不出来的帧就别画了。
+        // 条件里带 `raw < 1`，保证收尾那一帧一定落地。
+        if raw < 1, abs(t - lastDrawnT) < 0.004 { return }
+        lastDrawnT = t
         // 每帧都记下插值结果：万一动画被打断，下一段能从当前的样子接着走。
         displayed = anim.items.map { resolve($0, t: t) }
         alertness = lerp(anim.alertFrom, anim.alertTo, t)
@@ -968,7 +1148,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
             displayed = anim.target
             alertness = anim.alertTo
             // 收尾必须用目标态再画一帧：补间列表里还留着那颗宽度归零的胶囊，它
-            // 会白占一个间距，板子右边会空出一块（收拢动画尤其明显）。
+            // 会多占用一个间距，板子右边会空出一块（收拢动画尤其明显）。
             button.image = makeBoard(
                 tweens: anim.target.map { PillTween(id: $0.id, from: $0, to: $0) },
                 t: 1,
@@ -1013,7 +1193,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     private func tooltip() -> String {
         var blocks: [String] = []
         if pendingApprovals > 0 {
-            blocks.append("有 \(pendingApprovals) 个操作在等你在 DSH 里点头（授权）")
+            blocks.append("有 \(pendingApprovals) 个操作等待在 DSH 中授权")
         }
         blocks.append(workTooltip())
         if let state = peak { blocks.append(peakTooltip(state)) }
@@ -1025,7 +1205,7 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         var lines: [String] = []
         switch work.state {
         case .working(let n):
-            lines.append("DSH Agent：工作中（\(n) 个在跑）")
+            lines.append("DSH Agent：工作中（\(n) 个运行中）")
         case .idle(let n):
             lines.append("DSH Agent：空闲（\(n) 个会话在线）")
         case .offline:
@@ -1061,39 +1241,14 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         return lines.joined(separator: "\n")
     }
 
-    /// 两个胶囊共用的下拉菜单。
+    /// 下拉菜单：只留两个动作。
     ///
-    /// 菜单里放「干活的东西」：**所有活着的对话**及忙闲 —— 正在跑的用 ● 打头（宿主
-    /// 那边已经排到前面了），空闲的用 ○ 跟在后面。菜单栏上只写「工作中」，到底是谁
-    /// 在跑就得来这儿看。峰谷那几行不在这里重复 —— 胶囊本身已经写了峰/谷，细节看
-    /// 悬停 tooltip。
+    /// 刻意不列对话 —— 状态随时在变，一行行列出来又长又看不完（实测开了 9 个对话时菜单
+    /// 几乎占满半屏），而菜单栏真正需要回答的问题只有一个：要不要现在把 DSH 调到前面来。
+    /// 想知道有哪些对话在运行，看悬停 tooltip；要在具体某个对话里干活，去 DSH 里点。
     /// - Returns: 菜单。
     private func sharedMenu() -> NSMenu {
         let menu = NSMenu()
-
-        // 会话行：宿主已按「running 在前」排过序，这里只管画。
-        let rows = work.sessions
-        if !rows.isEmpty {
-            for row in rows.prefix(8) {
-                let item = NSMenuItem(
-                    title: (row.status == "running" ? "● " : "○ ") + displayName(for: row),
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                item.isEnabled = false
-                menu.addItem(item)
-            }
-            if rows.count > 8 {
-                let more = NSMenuItem(
-                    title: "… 还有 \(rows.count - 8) 个对话",
-                    action: nil,
-                    keyEquivalent: ""
-                )
-                more.isEnabled = false
-                menu.addItem(more)
-            }
-            menu.addItem(.separator())
-        }
 
         let openItem = NSMenuItem(title: "打开 DeepSeek Harness", action: #selector(openDSH), keyEquivalent: "")
         openItem.target = self

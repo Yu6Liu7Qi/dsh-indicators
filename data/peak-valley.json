@@ -51,6 +51,8 @@
     "quotedEn": "Off-peak rates are half of the peak rates. Peak hours are 01:00 - 04:00 and 06:00 - 10:00 UTC, Monday through Friday, excluding Chinese public holidays. All other hours are off-peak, including weekends and Chinese public holidays in full."
   },
   "rulesUpdatedAt": "2026-10-06",
-  "checkedAt": "2026-10-06T14:20:00+08:00",
-  "checkedNote": "初次导入：中文定价页脚注(2) + 国办发明电〔2025〕7号"
+  "checkedAt": "2026-10-12T22:45:00+08:00",
+  "checkedNote": "2026-10-12 复核：定价页时段口径与折扣比例无变更；2027 年放假安排尚未官宣（国务院通常每年 11 月前后公布）",
+  "importedAt": "2026-10-06T14:20:00+08:00",
+  "importedNote": "初次导入：中文定价页脚注(2) + 国办发明电〔2025〕7号"
 }
